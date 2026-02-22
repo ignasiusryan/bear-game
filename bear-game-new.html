@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bear Apple Catch</title>
+    <style>
+      :root {
+        --bg-top: #8ad3ff;
+        --bg-bottom: #dff8ff;
+        --panel: #153a56;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Trebuchet MS", "Verdana", sans-serif;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: linear-gradient(180deg, var(--bg-top), var(--bg-bottom));
+      }
+
+      .game-shell {
+        width: min(94vw, 860px);
+      }
+
+      .top-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 10px;
+        padding: 10px 14px;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.78);
+        color: var(--panel);
+        font-weight: 700;
+      }
+
+      button {
+        appearance: none;
+        border: 0;
+        border-radius: 10px;
+        padding: 10px 14px;
+        background: #ff8d41;
+        color: #fff;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      button:hover {
+        filter: brightness(1.07);
+      }
+
+      canvas {
+        width: 100%;
+        display: block;
+        border-radius: 14px;
+        border: 3px solid #224d6d;
+        background: linear-gradient(180deg, #b9ecff, #f2fdff);
+        box-shadow: 0 12px 30px rgba(0, 0, 0, 0.18);
+      }
+
+      .help {
+        margin-top: 10px;
+        padding: 10px 12px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.75);
+        color: #274a63;
+        font-size: 0.95rem;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="game-shell">
+      <div class="top-bar">
+        <div id="score">Score: 0</div>
+        <div id="misses">Missed apples: 0 / 5</div>
+        <button id="restart">Restart</button>
+      </div>
+      <canvas id="game" width="860" height="560"></canvas>
+      <div class="help">
+        Move with mouse or arrow keys. Catch apples for points. Big apples are worth +5.
+        Catching a durian or beach ball ends the game instantly.
+      </div>
+    </div>
+
+    <script>
+      const canvas = document.getElementById("game");
+      const ctx = canvas.getContext("2d");
+      const scoreEl = document.getElementById("score");
+      const missesEl = document.getElementById("misses");
+      const restartBtn = document.getElementById("restart");
+
+      const world = {
+        width: canvas.width,
+        height: canvas.height,
+        groundY: canvas.height - 28,
+      };
+
+      const bear = {
+        x: world.width / 2,
+        y: world.groundY - 68,
+        width: 98,
+        height: 70,
+        speed: 500,
+        moveLeft: false,
+        moveRight: false,
+      };
+
+      const state = {
+        score: 0,
+        missedApples: 0,
+        maxMisses: 5,
+        over: false,
+        spawnTimer: 0,
+        spawnRateBase: 0.44,
+        objects: [],
+      };
+
+      let audioCtx;
+      let lastTime = performance.now();
+
+      function ensureAudio() {
+        if (!audioCtx) {
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+      }
+
+      function playBiteSound() {
+        ensureAudio();
+        const now = audioCtx.currentTime;
+        const osc1 = audioCtx.createOscillator();
+        const osc2 = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+
+        osc1.type = "square";
+        osc2.type = "triangle";
+        osc1.frequency.setValueAtTime(530, now);
+        osc1.frequency.exponentialRampToValueAtTime(360, now + 0.12);
+        osc2.frequency.setValueAtTime(800, now);
+        osc2.frequency.exponentialRampToValueAtTime(480, now + 0.1);
+
+        gain.gain.setValueAtTime(0.0001, now);
+        gain.gain.exponentialRampToValueAtTime(0.18, now + 0.015);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+
+        osc1.connect(gain);
+        osc2.connect(gain);
+        gain.connect(audioCtx.destination);
+
+        osc1.start(now);
+        osc2.start(now);
+        osc1.stop(now + 0.17);
+        osc2.stop(now + 0.17);
+      }
+
+      function rand(min, max) {
+        return Math.random() * (max - min) + min;
+      }
+
+      function intersects(a, b) {
+        return (
+          a.x < b.x + b.width &&
+          a.x + a.width > b.x &&
+          a.y < b.y + b.height &&
+          a.y + a.height > b.y
+        );
+      }
+
+      function currentSpeedMultiplier() {
+        return 1 + state.score * 0.03;
+      }
+
+      function currentSpawnRate() {
+        const scaled = state.spawnRateBase - state.score * 0.0032;
+        return Math.max(0.13, scaled);
+      }
+
+      function chooseObjectType() {
+        const roll = Math.random();
+        if (roll < 0.1) return "danger-durian";
+        if (roll < 0.18) return "danger-ball";
+        if (roll < 0.28) return "big-apple";
+        return "apple";
+      }
+
+      function spawnObject() {
+        const type = chooseObjectType();
+        const speedBoost = currentSpeedMultiplier();
+        let size = 28;
+        let scoreValue = 1;
+        let danger = false;
+
+        if (type === "big-apple") {
+          size = 44;
+          scoreValue = 5;
+        } else if (type === "danger-durian") {
+          size = 30;
+          danger = true;
+        } else if (type === "danger-ball") {
+          size = 34;
+          danger = true;
+        }
+
+        state.objects.push({
+          type,
+          x: rand(10, world.width - size - 10),
+          y: -size - rand(0, 140),
+          width: size,
+          height: size,
+          speed: rand(135, 225) * speedBoost,
+          scoreValue,
+          danger,
+        });
+      }
+
+      function drawClouds() {
+        ctx.fillStyle = "rgba(255,255,255,0.85)";
+        const clouds = [
+          [130, 84, 54],
+          [350, 62, 44],
+          [640, 92, 60],
+        ];
+        for (const [x, y, r] of clouds) {
+          ctx.beginPath();
+          ctx.arc(x, y, r, 0, Math.PI * 2);
+          ctx.arc(x + r * 0.7, y + 6, r * 0.82, 0, Math.PI * 2);
+          ctx.arc(x - r * 0.65, y + 8, r * 0.75, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      function drawGround() {
+        ctx.fillStyle = "#7ac16b";
+        ctx.fillRect(0, world.groundY, world.width, world.height - world.groundY);
+      }
+
+      function drawBear() {
+        const x = bear.x;
+        const y = bear.y;
+        const w = bear.width;
+        const h = bear.height;
+
+        ctx.fillStyle = "#7a4b2f";
+        ctx.fillRect(x, y + 18, w, h - 14);
+        ctx.beginPath();
+        ctx.arc(x + w * 0.25, y + 16, 11, 0, Math.PI * 2);
+        ctx.arc(x + w * 0.75, y + 16, 11, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = "#996342";
+        ctx.fillRect(x + 12, y + 26, w - 24, h - 26);
+        ctx.fillStyle = "#1b130d";
+        ctx.beginPath();
+        ctx.arc(x + w * 0.36, y + 34, 4, 0, Math.PI * 2);
+        ctx.arc(x + w * 0.64, y + 34, 4, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = "#1b130d";
+        ctx.beginPath();
+        ctx.arc(x + w * 0.5, y + 49, 6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      function drawApple(o) {
+        ctx.fillStyle = o.type === "big-apple" ? "#d51c1c" : "#e73333";
+        ctx.beginPath();
+        ctx.arc(o.x + o.width / 2, o.y + o.height / 2, o.width / 2, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = "#694014";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(o.x + o.width / 2, o.y + 6);
+        ctx.lineTo(o.x + o.width / 2 + 2, o.y - 4);
+        ctx.stroke();
+
+        ctx.fillStyle = "#3fa24a";
+        ctx.beginPath();
+        ctx.ellipse(
+          o.x + o.width / 2 + 8,
+          o.y + 8,
+          o.type === "big-apple" ? 10 : 7,
+          o.type === "big-apple" ? 6 : 4,
+          -0.35,
+          0,
+          Math.PI * 2
+        );
+        ctx.fill();
+      }
+
+      function drawDurian(o) {
+        ctx.fillStyle = "#88a737";
+        ctx.beginPath();
+        ctx.arc(o.x + o.width / 2, o.y + o.height / 2, o.width / 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#4f6b18";
+        ctx.lineWidth = 2;
+        for (let i = 0; i < 10; i++) {
+          const angle = (Math.PI * 2 * i) / 10;
+          const cx = o.x + o.width / 2 + Math.cos(angle) * (o.width / 3);
+          const cy = o.y + o.height / 2 + Math.sin(angle) * (o.height / 3);
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          ctx.lineTo(cx + Math.cos(angle) * 8, cy + Math.sin(angle) * 8);
+          ctx.stroke();
+        }
+      }
+
+      function drawBall(o) {
+        const cx = o.x + o.width / 2;
+        const cy = o.y + o.height / 2;
+        const r = o.width / 2;
+        ctx.fillStyle = "#f6d64a";
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = "#f28b3f";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r - 4, -0.2, 3.1);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(cx, cy, r - 8, 0.9, 4.2);
+        ctx.stroke();
+      }
+
+      function drawObject(o) {
+        if (o.type === "apple" || o.type === "big-apple") {
+          drawApple(o);
+          return;
+        }
+        if (o.type === "danger-durian") {
+          drawDurian(o);
+          return;
+        }
+        drawBall(o);
+      }
+
+      function drawOverlay() {
+        if (!state.over) return;
+        ctx.fillStyle = "rgba(0,0,0,0.45)";
+        ctx.fillRect(0, 0, world.width, world.height);
+        ctx.fillStyle = "#fff";
+        ctx.textAlign = "center";
+        ctx.font = "bold 48px Trebuchet MS";
+        ctx.fillText("Game Over", world.width / 2, world.height / 2 - 16);
+        ctx.font = "bold 24px Trebuchet MS";
+        ctx.fillText(`Final Score: ${state.score}`, world.width / 2, world.height / 2 + 24);
+      }
+
+      function updateUI() {
+        scoreEl.textContent = `Score: ${state.score}`;
+        missesEl.textContent = `Missed apples: ${state.missedApples} / ${state.maxMisses}`;
+      }
+
+      function gameOver() {
+        state.over = true;
+      }
+
+      function update(dt) {
+        if (state.over) return;
+
+        if (bear.moveLeft) bear.x -= bear.speed * dt;
+        if (bear.moveRight) bear.x += bear.speed * dt;
+        bear.x = Math.max(0, Math.min(world.width - bear.width, bear.x));
+
+        state.spawnTimer += dt;
+        while (state.spawnTimer >= currentSpawnRate()) {
+          state.spawnTimer -= currentSpawnRate();
+          spawnObject();
+        }
+
+        for (let i = state.objects.length - 1; i >= 0; i--) {
+          const o = state.objects[i];
+          o.y += o.speed * dt;
+
+          if (intersects(o, bear)) {
+            if (o.danger) {
+              state.objects.splice(i, 1);
+              gameOver();
+              updateUI();
+              return;
+            }
+            state.score += o.scoreValue;
+            state.objects.splice(i, 1);
+            playBiteSound();
+            continue;
+          }
+
+          if (o.y > world.groundY - 2) {
+            state.objects.splice(i, 1);
+            if (!o.danger) {
+              state.missedApples += 1;
+              if (state.missedApples >= state.maxMisses) {
+                gameOver();
+              }
+            }
+          }
+        }
+
+        updateUI();
+      }
+
+      function draw() {
+        ctx.clearRect(0, 0, world.width, world.height);
+        drawClouds();
+        drawGround();
+        for (const o of state.objects) drawObject(o);
+        drawBear();
+        drawOverlay();
+      }
+
+      function loop(ts) {
+        const dt = Math.min(0.033, (ts - lastTime) / 1000);
+        lastTime = ts;
+        update(dt);
+        draw();
+        requestAnimationFrame(loop);
+      }
+
+      function resetGame() {
+        state.score = 0;
+        state.missedApples = 0;
+        state.over = false;
+        state.spawnTimer = 0;
+        state.objects = [];
+        bear.x = world.width / 2 - bear.width / 2;
+        updateUI();
+      }
+
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "ArrowLeft") bear.moveLeft = true;
+        if (e.key === "ArrowRight") bear.moveRight = true;
+      });
+
+      window.addEventListener("keyup", (e) => {
+        if (e.key === "ArrowLeft") bear.moveLeft = false;
+        if (e.key === "ArrowRight") bear.moveRight = false;
+      });
+
+      canvas.addEventListener("mousemove", (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const mx = ((e.clientX - rect.left) / rect.width) * world.width;
+        bear.x = Math.max(0, Math.min(world.width - bear.width, mx - bear.width / 2));
+      });
+
+      canvas.addEventListener("pointerdown", ensureAudio);
+      window.addEventListener("keydown", ensureAudio, { once: true });
+      restartBtn.addEventListener("click", resetGame);
+
+      resetGame();
+      requestAnimationFrame(loop);
+    </script>
+  </body>
+</html>
